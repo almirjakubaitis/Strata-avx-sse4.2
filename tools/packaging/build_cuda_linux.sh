@@ -5,6 +5,12 @@
 #   VARIANT=cuda13 tools/packaging/build_cuda_linux.sh     # CUDA 13: RTX 20 and newer (sm_75 .. sm_120)
 #   SHAPE=q4_lite tools/packaging/build_cuda_linux.sh      # the engine of a model shape, its own component (tools/packaging/shape_build.sh)
 #
+# STRATA_ISA_FLOOR (experimental, the engine's own switch in CMakeLists.txt): an older CPU than the AVX2 release baseline.
+#   STRATA_ISA_FLOOR=avx VARIANT=cuda12 ARCHS=61 tools/packaging/build_cuda_linux.sh    # Sandy / Ivy Bridge: AVX, no AVX2 / FMA / F16C
+#   STRATA_ISA_FLOOR=none VARIANT=cuda12 ARCHS=61 tools/packaging/build_cuda_linux.sh   # SSE4.2 + POPCNT: Nehalem / Westmere
+# It cannot be combined with STRATA_PORTABLE (CMakeLists.txt refuses both), so the flag replaces the portable AVX2 baseline and
+# the picture reader is built for the same floor. A floor build starts only on a CPU that has that floor, never on an older one.
+#
 # Run it on a Linux x86_64 box with the CUDA toolkit of that variant on PATH (nvcc; CUDA_HOME=<toolkit> names its lib64 for the library bundle when it is not /usr/local/cuda) and a Python 3 venv with requirements.txt and
 # requirements-build.txt. ggml comes from the vendored engine/third_party/strata-ggml: nothing is downloaded. STRATA_GGML_DIR=<llama.cpp checkout>
 # builds from that checkout instead (an override, kept for two releases).
@@ -23,9 +29,25 @@ case "$variant" in
   cuda13) archs=${ARCHS:-75;86;89;120}; mindriver=580.65; sm60=OFF ;;
   *) echo "build_cuda_linux.sh: VARIANT must be cuda12 or cuda13" >&2; exit 2 ;;
 esac
-out=${OUT:-$repo/out-engine-$variant}
-build=${BUILD:-$repo/build-$variant}
+# Experimental older-CPU build (the engine's STRATA_ISA_FLOOR): "avx" is Sandy / Ivy Bridge (AVX, no AVX2 / FMA / F16C),
+# "none" is SSE4.2 + POPCNT (Nehalem / Westmere).  Empty is the normal AVX2 release engine.
+floor=${STRATA_ISA_FLOOR:-}
+case "$floor" in
+  ""|avx|none) ;;
+  *) echo "build_cuda_linux.sh: STRATA_ISA_FLOOR must be avx or none (got '$floor')" >&2; exit 2 ;;
+esac
+floor_suffix=""; [ -z "$floor" ] || floor_suffix="-$floor"
+out=${OUT:-$repo/out-engine-$variant$floor_suffix}
+build=${BUILD:-$repo/build-$variant$floor_suffix}
 py=${PYTHON:-python3}
+if [ -n "$floor" ]; then
+  # an older-CPU build replaces STRATA_PORTABLE (CMakeLists.txt: the two exclude each other); the picture reader takes the same floor
+  engine_cpu_flags="-DSTRATA_ISA_FLOOR=$floor"
+  vision_cpu_flags="-DSTRATA_PORTABLE=OFF -DSTRATA_ISA_FLOOR=$floor"
+else
+  engine_cpu_flags="-DSTRATA_PORTABLE=ON"
+  vision_cpu_flags="-DSTRATA_PORTABLE=ON"
+fi
 cudafull=$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
 case "$variant:$cudafull" in
   cuda12:12.*|cuda13:13.*) ;;
@@ -42,7 +64,7 @@ ggml=""; [ -z "${STRATA_GGML_DIR:-}" ] || ggml="-DSTRATA_GGML_DIR=$STRATA_GGML_D
 #   STRATA_CMAKE_EXTRA="-DSTRATA_GEOMETRY_FILE=/abs/path/geometry.hpp"   (or -DSTRATA_GEOMETRY=<name>)
 # shellcheck disable=SC2086
 cmake -G Ninja -S engine -B "$build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
-    -DSTRATA_EXPERIMENTAL_SM60=$sm60 -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON \
+    -DSTRATA_EXPERIMENTAL_SM60=$sm60 -DSTRATA_NATIVE_EXPERTS=ON $engine_cpu_flags -DSTRATA_Q6K_EXPERTS=ON \
     "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" $ggml ${STRATA_CMAKE_EXTRA:-} $shape_cmake $sym_cmake
 # (llama.cpp's MMQ and strata_kq left the tree in 0.2.16; MMQ comparison builds come from the v0.2.15 tag)
 . "$repo/tools/packaging/engine_targets.sh"
@@ -52,15 +74,19 @@ cmake --build "$build" --target $targets -j "$(nproc)"
 
 # The picture reader is built for the SAME architectures as the engine (#3669: a reader reused from an older build had no sm_60, and on
 # a Pascal card the engine ran while the reader died with "device kernel image is invalid"). BUILD_VISION=0 ships a text-only package.
-vision_dir=${BUILD_VISION_DIR:-$repo/build-vision-$variant}
+vision_dir=${BUILD_VISION_DIR:-$repo/build-vision-$variant$floor_suffix}
 if [ "${BUILD_VISION:-1}" = 1 ]; then
   # strata-vision is Strata's own reader (terminal/tools/vision/own): no llama.cpp source, STRATA_GGML_DIR does not reach it
   cmake -G Ninja -S terminal/tools/vision -B "$vision_dir" -DCMAKE_BUILD_TYPE=Release \
-      -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=ON "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" $sym_cmake
+      -DSTRATA_VISION_CUDA=ON $vision_cpu_flags "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" $sym_cmake
   cmake --build "$vision_dir" --target strata-vision -j "$(nproc)"
 fi
 
 ver=$(sed -n 's/^[[:space:]]*project([^)]*VERSION[[:space:]]*\([0-9][0-9.]*\).*/\1/p' engine/CMakeLists.txt | head -1)
+portable_json=true floor_json=""
+if [ -n "$floor" ]; then
+  portable_json=false floor_json=", \"isa_floor\": \"$floor\""
+fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/strata-engine-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 cp "$build/strata" "$stage/"
@@ -70,16 +96,16 @@ if [ -f "$vision_dir/bin/strata-vision" ]; then
   cp "$vision_dir/bin/strata-vision" "$stage/"
   vision_json=", \"vision_archs\": \"$archs\""        # package_engine.py refuses a reader whose archs do not cover the engine's
 fi
-echo "{\"version\": \"$ver\", \"source\": \"tools/packaging/build_cuda_linux.sh\", \"archs\": \"$archs\", \"cuda\": \"$cudafull\", \"portable\": true$vision_json}" > "$stage/BUILD.json"
+echo "{\"version\": \"$ver\", \"source\": \"tools/packaging/build_cuda_linux.sh\", \"archs\": \"$archs\", \"cuda\": \"$cudafull\", \"portable\": $portable_json$floor_json$vision_json}" > "$stage/BUILD.json"
 # the symbol files (owner decision 2026-11-25): split off the stage copies, before package_engine.py hashes them; stored outside the package
-symbols_keep elf "$repo" "$(if [ -n "${SHAPE:-}" ]; then echo "strata-$(echo "$SHAPE" | tr _ -)"; else echo strata-engine; fi)-$ver-linux-x86_64-cuda-$variant" "$stage/strata" $( [ -f "$stage/strata-vision" ] && echo "$stage/strata-vision" )
+symbols_keep elf "$repo" "$(if [ -n "${SHAPE:-}" ]; then echo "strata-$(echo "$SHAPE" | tr _ -)"; else echo strata-engine; fi)-$ver-linux-x86_64-cuda-$variant$floor_suffix" "$stage/strata" $( [ -f "$stage/strata-vision" ] && echo "$stage/strata-vision" )
 "$py" tools/packaging/collect_libs.py --binary "$build/strata" --search "${CUDA_HOME:-/usr/local/cuda}/lib64" --out "$stage" --also 'libcublasLt.so*'
 shape_check env LD_LIBRARY_PATH="$stage" "$stage/strata"
 arch_args=""; for a in $(echo "$archs" | tr ';,' '  '); do arch_args="$arch_args --arch sm_$a"; done
 mkdir -p "$out"
 # shellcheck disable=SC2086
 "$py" tools/packaging/package_engine.py --src "$stage" --backend cuda --version "$ver" --out "$out" $arch_args --arch "compute_$last" \
-    --min-driver nvidia=$mindriver --variant "$variant" --platform linux-x86_64 --build-id "release-${ver}-${variant}-${cudafull}" \
+    --min-driver nvidia=$mindriver --variant "$variant" --platform linux-x86_64 --build-id "release-${ver}-${variant}${floor_suffix}-${cudafull}" \
     --include SYSTEM-LIBS.txt --include 'libstrata_kq*' $shape_pkg
 for d in "$out"/*/; do "$py" tools/packaging/package_engine.py --verify "$d"; "$py" tools/packaging/binary_deps.py "$d"; done
 echo "built: $out"

@@ -15,6 +15,7 @@ rem source is compiled and nothing is downloaded.
 rem
 rem Settings (all optional): VISION_BUILD_DIR  the build folder
 rem   VISION_ARCHS  override the architecture list (semicolons)      BUILD_JOBS  the number of compile jobs (default 4: the CUDA compiler uses RAM)
+rem   STRATA_ISA_FLOOR  avx or none: an older-CPU engine package (build_cuda_windows.py) builds its reader for the same floor
 rem
 rem It copies strata-vision.exe into <stage folder> and writes vision_archs into <stage folder>\BUILD.json. Nothing is uploaded.
 setlocal EnableDelayedExpansion
@@ -38,12 +39,17 @@ if not defined VISION_BUILD_DIR set "VISION_BUILD_DIR=%SRC%\build-vision-%VARIAN
 if not exist "%STAGE%" mkdir "%STAGE%"
 
 where cl >nul 2>nul || (
-  for %%V in ("%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools" "%ProgramFiles%\Microsoft Visual Studio\2022\Community" "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools") do (
+  for %%V in ("%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools" "%ProgramFiles%\Microsoft Visual Studio\2022\Community" "%ProgramFiles%\Microsoft Visual Studio\2022\Professional" "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise" "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools") do (
     if exist "%%~V\VC\Auxiliary\Build\vcvars64.bat" if not defined VCVARS set "VCVARS=%%~V\VC\Auxiliary\Build\vcvars64.bat"
   )
   if defined VCVARS call "!VCVARS!" >nul
 )
 where cl >nul 2>nul || (echo cl.exe not found: run this from an x64 Native Tools prompt & exit /b 1)
+
+rem An older-CPU engine package (build_cuda_windows.py STRATA_ISA_FLOOR=avx|none): the reader is built for the same floor,
+rem which needs STRATA_PORTABLE=OFF (the AVX2 release baseline and a floor exclude each other).
+set "CPU_FLAGS=-DSTRATA_PORTABLE=ON"
+if defined STRATA_ISA_FLOOR set "CPU_FLAGS=-DSTRATA_PORTABLE=OFF -DSTRATA_ISA_FLOOR=%STRATA_ISA_FLOOR%"
 
 rem every arch real, and PTX for the newest one, the way the engine is built
 set "REAL="
@@ -52,7 +58,7 @@ for %%A in (%ARCHS:;= %) do (
   if defined REAL (set "REAL=!REAL!;%%A-real") else (set "REAL=%%A-real")
 )
 cmake -G Ninja -S "%SRC%\terminal\tools\vision" -B "%VISION_BUILD_DIR%" -DCMAKE_BUILD_TYPE=Release %STRATA_SYM_CMAKE% ^
-  -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=ON ^
+  -DSTRATA_VISION_CUDA=ON %CPU_FLAGS% ^
   "-DCMAKE_CUDA_ARCHITECTURES=!REAL!;!LAST!-virtual" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
   "-DCMAKE_CUDA_COMPILER=%CUDA_PATH%/bin/nvcc.exe" "-DCUDAToolkit_ROOT=%CUDA_PATH%" || exit /b 1
 cmake --build "%VISION_BUILD_DIR%" --target strata-vision -j %BUILD_JOBS% || exit /b 1

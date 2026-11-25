@@ -16,6 +16,9 @@ Settings (environment, all optional):
   STRATA_CMAKE_EXTRA  more engine configure arguments (they come last on the configure line)
   BUILD / BUILD_VISION_DIR / OUT   the engine build folder, the reader's build folder, the package folder
   ARCHS               the architecture list instead of the variant's (semicolons, e.g. 120; the last one also gets PTX), as in build_cuda_linux.sh
+  STRATA_ISA_FLOOR    avx or none: the experimental older-CPU engine (CMakeLists.txt).  "avx" is Sandy / Ivy Bridge (AVX, no
+                      AVX2 / FMA / F16C), "none" is SSE4.2 (Nehalem / Westmere).  It cannot be STRATA_PORTABLE (the AVX2 release
+                      baseline), so it replaces that flag and the picture reader is built for the same floor.
   BUILD_JOBS          compile jobs (default 6: the CUDA compiler takes several GB of RAM per job)
   COMMIT              the source commit for the build id (default: git rev-parse HEAD; required in a tree without .git)
   STRATA_GGML_DIR     a llama.cpp checkout to take ggml (and the reader's sources) from instead (an override, kept for two releases)
@@ -42,6 +45,8 @@ VARIANTS = {
 }
 VCVARS = [Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / r"Microsoft Visual Studio\2022\BuildTools",
           Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / r"Microsoft Visual Studio\2022\Community",
+          Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / r"Microsoft Visual Studio\2022\Professional",
+          Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / r"Microsoft Visual Studio\2022\Enterprise",
           Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / r"Microsoft Visual Studio\2022\BuildTools"]
 
 
@@ -65,12 +70,22 @@ def parse_archs(text: str) -> tuple[int, ...]:
     return archs
 
 
+def isa_floor() -> str:
+    """STRATA_ISA_FLOOR: "" (the normal AVX2 release engine), "avx" (Sandy / Ivy Bridge) or "none" (SSE4.2, Nehalem / Westmere)."""
+    floor = (os.environ.get("STRATA_ISA_FLOOR") or "").strip().lower()
+    if floor not in ("", "avx", "none"):
+        fail("STRATA_ISA_FLOOR must be avx or none (got %r)" % floor)
+    return floor
+
+
 def configure_args(src: Path, build: Path, variant: str, cuda: Path, extra: list[str], ggml_dir: str = "",
                    archs: tuple[int, ...] | None = None) -> list[str]:
     """The release's engine configure line (CMake defaults for everything it does not name)."""
     cu = cuda.as_posix()
+    floor = isa_floor()
+    cpu = ["-DSTRATA_ISA_FLOOR=" + floor] if floor else ["-DSTRATA_PORTABLE=ON"]
     args = ["-G", "Ninja", "-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release", "-DSTRATA_ENABLE_CUDA=ON",
-            "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_NATIVE_EXPERTS=ON", "-DSTRATA_PORTABLE=ON", *VARIANTS[variant][3],
+            "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_NATIVE_EXPERTS=ON", *cpu, *VARIANTS[variant][3],
             "-DCMAKE_CUDA_ARCHITECTURES=" + cuda_arch_list(archs or VARIANTS[variant][1]), "-DCMAKE_CUDA_COMPILER=%s/bin/nvcc.exe" % cu,
             "-DCUDAToolkit_ROOT=" + cu]
     if ggml_dir:
@@ -165,10 +180,12 @@ def main(argv: list[str]) -> int:
     cu, archs, mindriver, _ = VARIANTS[variant]
     if os.environ.get("ARCHS"):
         archs = parse_archs(os.environ["ARCHS"])
+    floor = isa_floor()
+    suffix = "-" + floor if floor else ""
     src = REPO
-    build = Path(os.environ.get("BUILD") or src / ("build-win-" + variant))
-    vision_dir = Path(os.environ.get("BUILD_VISION_DIR") or src / ("build-vision-%s-win" % variant))
-    out = Path(os.environ.get("OUT") or src / ("out-engine-win-" + variant))
+    build = Path(os.environ.get("BUILD") or src / ("build-win-" + variant + suffix))
+    vision_dir = Path(os.environ.get("BUILD_VISION_DIR") or src / ("build-vision-%s-win%s" % (variant, suffix)))
+    out = Path(os.environ.get("OUT") or src / ("out-engine-win-" + variant + suffix))
     jobs = os.environ.get("BUILD_JOBS") or "6"
     extra = (os.environ.get("STRATA_CMAKE_EXTRA") or "").split()
     version, commit = project_version(ENGINE_SRC), source_commit(src)
@@ -182,7 +199,7 @@ def main(argv: list[str]) -> int:
     targets = engine_targets(cmake, build, env)
     print("engine targets: " + " ".join(targets), flush=True)
     run([cmake, "--build", str(build), "-j", jobs, "--target", *targets], env)
-    symbols = Path(os.environ.get("SYMBOLS_DIR") or src / "symbols") / ("strata-engine-%s-windows-x86_64-cuda-%s" % (version, variant))
+    symbols = Path(os.environ.get("SYMBOLS_DIR") or src / "symbols") / ("strata-engine-%s-windows-x86_64-cuda-%s%s" % (version, variant, suffix))
     if keep_symbols():
         # the PDBs of the exes this package ships, copied out of the build folder before anything cleans it (never into the package)
         run([sys.executable, str(PACKAGING / "keep_symbols.py"), "pe", "--out", str(symbols), "--pdb-dir", str(build), "--require",
@@ -195,9 +212,12 @@ def main(argv: list[str]) -> int:
                 shutil.copy2(build / name, stage / name)
             elif name in targets or name == "strata.exe":
                 fail("the build made no %s" % name)
-        (stage / "BUILD.json").write_text(json.dumps({"version": version, "source": "packaging/build_cuda_windows.py", "commit": commit[:12],
-                                                      "archs": list(archs), "ptx": True, "cuda": cu, "vision": "gpu-cuda" + cu.split(".")[0],
-                                                      "portable": True}, indent=1), encoding="utf-8")
+        record = {"version": version, "source": "packaging/build_cuda_windows.py", "commit": commit[:12],
+                  "archs": list(archs), "ptx": True, "cuda": cu, "vision": "gpu-cuda" + cu.split(".")[0],
+                  "portable": not floor}
+        if floor:
+            record["isa_floor"] = floor
+        (stage / "BUILD.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
         venv = dict(env, VISION_BUILD_DIR=str(vision_dir), BUILD_JOBS=jobs, VISION_ARCHS=";".join(str(a) for a in archs))
         if keep_symbols():
             venv["STRATA_SYM_CMAKE"] = "-DSTRATA_KEEP_SYMBOLS=ON"
@@ -209,7 +229,7 @@ def main(argv: list[str]) -> int:
         py = sys.executable
         cmd = [py, str(PACKAGING / "package_engine.py"), "--src", str(stage), "--backend", "cuda", "--version", version, "--out", str(out),
                *[x for a in archs for x in ("--arch", "sm_%d" % a)], "--arch", "compute_%d" % archs[-1], "--min-driver", "nvidia=" + mindriver,
-               "--variant", variant, "--platform", "windows-x86_64", "--build-id", "%s+cuda%s" % (commit[:12], cu),
+               "--variant", variant, "--platform", "windows-x86_64", "--build-id", "%s+cuda%s%s" % (commit[:12], cu, suffix),
                "--include", "strata-vision.exe", "--include", "strata_kq.dll"]
         run(cmd, env)
     finally:
