@@ -1,0 +1,137 @@
+name: Engine builds (Pascal P6000, older CPUs)
+
+# Manual only (Actions -> "Engine builds (Pascal P6000, older CPUs)" -> Run workflow).
+#
+# Four engine packages for a Quadro P6000 (Pascal, compute capability 6.1 = sm_61) on a PC whose CPU has no AVX2:
+#   avx      Sandy / Ivy Bridge (AVX, no AVX2 / FMA / F16C)
+#   none     SSE4.2 + POPCNT (Nehalem / Westmere)
+# on Linux and on Windows.
+#
+# The variant is cuda12 (CUDA 12.9, the Pascal / Volta toolkit), which passes -DSTRATA_EXPERIMENTAL_SM60=ON: that is
+# what compiles the Pascal paths (fuse-decode, STRATA_PATTN_SM60, STRATA_SELECT_LONG, the expert nibble kernels).
+# ARCHS=61 keeps only sm_61 machine code, so the package starts on a P6000 and nowhere else.
+#
+# The older-CPU floor cannot be STRATA_PORTABLE (CMakeLists.txt refuses both): tools/packaging/build_cuda_linux.sh and
+# build_cuda_windows.py pass -DSTRATA_ISA_FLOOR instead, and build the picture reader for the same floor. The switches
+# for the card and the limits are in tools/packaging/PASCAL-OLDER-CPU.md, which travels in every tarball.
+#
+# Nothing here is published or signed; the artifacts are build outputs of this run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pascal-old-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VARIANT: cuda12
+  CUDA_ARCHS: '61'
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.floor }} (sm_61)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    container: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        floor: [avx, none]
+    steps:
+      - name: Tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build binutils
+          cmake --version | head -1
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the engine package
+        env:
+          VARIANT: ${{ env.CUDA_VARIANT }}
+          ARCHS: ${{ env.CUDA_ARCHS }}
+          STRATA_ISA_FLOOR: ${{ matrix.floor }}
+        run: |
+          nvcc --version | tail -2
+          tools/packaging/build_cuda_linux.sh
+      - name: Tarball
+        shell: bash
+        env:
+          FLOOR: ${{ matrix.floor }}
+          SUFFIX: ${{ matrix.floor == 'none' && 'sse4.2' || 'avx' }}
+        run: |
+          set -eu
+          ver=$(sed -n 's/^[[:space:]]*project([^)]*VERSION[[:space:]]*\([0-9][0-9.]*\).*/\1/p' engine/CMakeLists.txt | head -1)
+          name="strata-engine-${ver}-linux-x86_64-cuda-cuda12-${SUFFIX}-quadro-p6000"
+          stage="$RUNNER_TEMP/tarball-$SUFFIX"
+          rm -rf "$stage"; mkdir -p "$stage"
+          cp -a "out-engine-${CUDA_VARIANT}-${FLOOR}/${ver}-linux-x86_64-cuda-cuda12" "$stage/"
+          cp tools/packaging/PASCAL-OLDER-CPU.md "$stage/"
+          tar -czf "${name}.tar.gz" -C "$stage" .
+          ls -l "${name}.tar.gz"
+          echo "tarball=${name}.tar.gz" >> "$GITHUB_ENV"
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.floor }}
+          path: ${{ env.tarball }}
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows ${{ matrix.floor }} (sm_61)
+    runs-on: windows-2022
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        floor: [avx, none]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: CUDA 12.9
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.9.1'
+          method: 'local'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
+          log-file-suffix: 'windows-${{ matrix.floor }}.txt'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the engine package
+        env:
+          ARCHS: ${{ env.CUDA_ARCHS }}
+          STRATA_ISA_FLOOR: ${{ matrix.floor }}
+          BUILD_JOBS: 4
+        run: |
+          nvcc --version
+          python tools\packaging\build_cuda_windows.py cuda12
+      - name: Tarball
+        shell: bash
+        env:
+          FLOOR: ${{ matrix.floor }}
+          SUFFIX: ${{ matrix.floor == 'none' && 'sse4.2' || 'avx' }}
+        run: |
+          set -eu
+          ver=$(sed -n 's/^[[:space:]]*project([^)]*VERSION[[:space:]]*\([0-9][0-9.]*\).*/\1/p' engine/CMakeLists.txt | head -1)
+          name="strata-engine-${ver}-windows-x86_64-cuda-cuda12-${SUFFIX}-quadro-p6000"
+          stage="$RUNNER_TEMP/tarball-$SUFFIX"
+          rm -rf "$stage"; mkdir -p "$stage"
+          cp -a "out-engine-win-cuda12-${FLOOR}/${ver}-windows-x86_64-cuda-cuda12" "$stage/"
+          cp tools/packaging/PASCAL-OLDER-CPU.md "$stage/"
+          tar -czf "${name}.tar.gz" -C "$stage" .
+          ls -l "${name}.tar.gz"
+          echo "tarball=${name}.tar.gz" >> "$GITHUB_ENV"
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.floor }}
+          path: ${{ env.tarball }}
+          if-no-files-found: error
+          retention-days: 14
