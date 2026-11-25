@@ -44,8 +44,12 @@ jobs:
     steps:
       - name: Tools
         run: |
+          # The CUDA devel image has nvcc but no host compiler and no python3, which the engine and the packagers need.
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build binutils
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates cmake ninja-build binutils python3
+          g++ --version | head -1
+          python3 --version
           cmake --version | head -1
       - uses: actions/checkout@v4
         with:
