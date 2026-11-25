@@ -47,8 +47,9 @@ py -3 tools\packaging\build_cuda_windows.py cuda12
 ```
 
 `ARCHS=61` is the P6000. `-DSTRATA_EXPERIMENTAL_SM60=ON` is part of the `cuda12` variant, and it is what compiles the
-Pascal / Volta paths (`STRATA_FUSE_DECODE`, `STRATA_PATTN_SM60`, `STRATA_SELECT_LONG`, the expert nibble kernels). Without
-it those switches are refused at start.
+Pascal / Volta paths (`STRATA_FUSE_DECODE`, `STRATA_PATTN_SM60`, `STRATA_SELECT_LONG`, the expert nibble kernels).
+Without it those switches have nothing to select: `STRATA_SELECT_LONG` says so and is ignored, and the fused decode
+and the sm_6x attention kernels are not in the binary.
 
 The picture reader (`strata-vision`) is built for the same floor and the same `sm_61`, so a picture request works on the
 old CPU too.
@@ -72,8 +73,9 @@ STRATA_PATTN_SM60=1
 ```
 
 `STRATA_FUSE_DECODE`, `STRATA_SELECT_LONG` and `STRATA_PATTN_SM60` exist only in the `STRATA_EXPERIMENTAL_SM60` build;
-this build is that one. None of them changes which tokens a greedy answer has in the measurements recorded in the source
-comments, but they are opt-in: a machine that has not been measured with them should be measured before they are kept.
+this build is that one. They are opt-in speed switches: the source checks the sm_6x attention kernels and the fused
+decode kernels bit for bit against the reference, and the others change scheduling. Measure on the PC before keeping
+the set.
 
 ## Limits
 

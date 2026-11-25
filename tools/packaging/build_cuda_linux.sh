@@ -14,7 +14,7 @@
 # Run it on a Linux x86_64 box with the CUDA toolkit of that variant on PATH (nvcc; CUDA_HOME=<toolkit> names its lib64 for the library bundle when it is not /usr/local/cuda) and a Python 3 venv with requirements.txt and
 # requirements-build.txt. ggml comes from the vendored engine/third_party/strata-ggml: nothing is downloaded. STRATA_GGML_DIR=<llama.cpp checkout>
 # builds from that checkout instead (an override, kept for two releases).
-# The package lands in $OUT (default ./out-engine-<variant>). Nothing is uploaded.
+# The package lands in $OUT (default ./out-engine-<variant>, with -<floor> appended in an older-CPU build). Nothing is uploaded.
 #
 # The cuda12 package is the one the feed and docs/DOCKER.md offer to Pascal and Volta cards, so it needs machine code for sm_60,
 # sm_61 and sm_70 and the -DSTRATA_EXPERIMENTAL_SM60=ON build (#3503: the 0.2.1 package had sm_75 / 86 / 89 only, and a P100
