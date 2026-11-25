@@ -61,7 +61,8 @@ jobs:
           STRATA_ISA_FLOOR: ${{ matrix.floor }}
         run: |
           nvcc --version | tail -2
-          tools/packaging/build_cuda_linux.sh
+          # the packaging scripts are not executable in the tree (mode 100644): run it through sh
+          sh tools/packaging/build_cuda_linux.sh
       - name: Tarball
         shell: bash
         env:
